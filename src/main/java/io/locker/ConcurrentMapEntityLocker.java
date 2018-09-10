@@ -41,8 +41,8 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
      * @throws InterruptedException if the current thread is interrupted while acquiring the lock
      */
     public void lock(@NonNull ID entityId) throws InterruptedException {
-        globalLock.lockInterruptibly();
         for (; ; ) {
+            globalLock.lockInterruptibly();
             ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
             lock.lockInterruptibly();
             if (lock == lockerMap.get(entityId)) {
@@ -51,6 +51,7 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
                 log.info("Lock for entity with id={} is acquired", entityId);
                 return;
             }
+            globalLock.unlock();
             lock.unlock();
         }
     }
@@ -71,10 +72,10 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
     @Override
     public boolean tryLock(@NonNull ID entityId, long time, @NonNull TimeUnit unit) throws InterruptedException {
         long timeout = System.nanoTime() + unit.toNanos(time);
-        if (!globalLock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
-            return false;
-        }
         for (; ; ) {
+            if (!globalLock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+                return false;
+            }
             ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
             if (!lock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
                 globalLock.unlock();
@@ -86,6 +87,7 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
                 log.info("Lock for entity with id={} is acquired", entityId);
                 return true;
             }
+            globalLock.unlock();
             lock.unlock();
         }
     }
