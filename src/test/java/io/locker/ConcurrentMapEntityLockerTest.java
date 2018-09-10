@@ -49,7 +49,7 @@ public class ConcurrentMapEntityLockerTest {
     }
 
     @Test(expected = IllegalMonitorStateException.class)
-    public void lockerShouldThrowMonitorExceptionsOnUnlockWithoutLock() {
+    public void lockerShouldThrowIllegalMonitorExceptionsOnUnlockWithoutLock() {
         Integer entityId = 129;
         locker.unlock(entityId);
     }
@@ -58,10 +58,8 @@ public class ConcurrentMapEntityLockerTest {
     public void lockerShouldNotThrowExceptionsOnLockOnOneEntityFromTwoThreads() throws ExecutionException, InterruptedException {
         Integer entityId = 129;
 
-        Runnable runnable = createRunnable(entityId);
-
-        Future<?> future1 = executorService.submit(runnable);
-        Future<?> future2 = executorService.submit(runnable);
+        Future<?> future1 = executorService.submit(createRunnable(entityId));
+        Future<?> future2 = executorService.submit(createRunnable(entityId));
         future1.get();
         future2.get();
     }
@@ -71,11 +69,8 @@ public class ConcurrentMapEntityLockerTest {
         Integer entityId1 = 129;
         Integer entityId2 = 129;
 
-        Runnable runnable1 = createRunnable(entityId1);
-        Runnable runnable2 = createRunnable(entityId2);
-
-        Future<?> future1 = executorService.submit(runnable1);
-        Future<?> future2 = executorService.submit(runnable2);
+        Future<?> future1 = executorService.submit(createRunnable(entityId1));
+        Future<?> future2 = executorService.submit(createRunnable(entityId2));
         future1.get();
         future2.get();
     }
@@ -85,22 +80,18 @@ public class ConcurrentMapEntityLockerTest {
         Integer entityId1 = 129;
         Integer entityId2 = 130;
 
-        Runnable runnable1 = createRunnable(entityId1);
-        Runnable runnable2 = createRunnable(entityId2);
-
-        Future<?> future1 = executorService.submit(runnable1);
-        Future<?> future2 = executorService.submit(runnable2);
+        Future<?> future1 = executorService.submit(createRunnable(entityId1));
+        Future<?> future2 = executorService.submit(createRunnable(entityId2));
         future1.get();
         future2.get();
     }
 
     @Test(expected = IllegalMonitorStateException.class)
-    public void lockerShouldThrowMonitorExceptionsOnUnlockFromOtherThread() throws ExecutionException, InterruptedException {
+    public void lockerShouldThrowIllegalMonitorExceptionsOnUnlockFromOtherThread() throws ExecutionException, InterruptedException {
         Integer entityId = 129;
         CountDownLatch endLatch = new CountDownLatch(THREADS_COUNT);
 
-        Runnable runnable = createRunnableWithEndLatch(entityId, endLatch);
-        Future<?> future = executorService.submit(runnable);
+        Future<?> future = executorService.submit(createRunnableWithLockAndEndLatch(entityId, endLatch));
         try {
             latch.countDown();
             latch.await();
@@ -124,8 +115,7 @@ public class ConcurrentMapEntityLockerTest {
     public void lockerShouldNotThrowExceptionsOnReentrantLockFromTwoThreads() throws InterruptedException, ExecutionException {
         Integer entityId = 129;
 
-        Runnable runnable = createRunnable(entityId);
-        Future<?> future = executorService.submit(runnable);
+        Future<?> future = executorService.submit(createRunnable(entityId));
 
         locker.lock(entityId);
         locker.lock(entityId);
@@ -139,20 +129,18 @@ public class ConcurrentMapEntityLockerTest {
     }
 
     @Test
-    public void lockerShouldReturnFalseOnTryLockOnOneEntityFromTwoThreads() throws ExecutionException, InterruptedException {
+    public void lockerShouldReturnFalseOnLockAndThenTryLockOnOneEntityFromTwoThreads() throws ExecutionException, InterruptedException {
         Integer entityId = 129;
-        CountDownLatch endLatch = new CountDownLatch(THREADS_COUNT);
 
-        Runnable runnable = createRunnableWithEndLatch(entityId, endLatch);
-        Future<?> future = executorService.submit(runnable);
+        Future<Boolean> future = executorService.submit(createCallable(entityId));
+
+        locker.lock(entityId);
         latch.countDown();
         latch.await();
 
-        boolean locked = locker.tryLock(entityId, 100, TimeUnit.MILLISECONDS);
-        assertFalse(locked);
+        assertFalse(future.get());
 
-        endLatch.countDown();
-        future.get();
+        locker.unlock(entityId);
     }
 
     @Test
@@ -160,14 +148,110 @@ public class ConcurrentMapEntityLockerTest {
         Integer entityId1 = 129;
         Integer entityId2 = 130;
 
-        Callable<Boolean> callable1 = createCallable(entityId1);
-        Callable<Boolean> callable2 = createCallable(entityId2);
-
-        Future<Boolean> future1 = executorService.submit(callable1);
-        Future<Boolean> future2 = executorService.submit(callable2);
+        Future<Boolean> future1 = executorService.submit(createCallable(entityId1));
+        Future<Boolean> future2 = executorService.submit(createCallable(entityId2));
 
         assertTrue(future1.get());
         assertTrue(future2.get());
+    }
+
+    @Test
+    public void lockerShouldNotThrowExceptionsOnGlobalLock() throws InterruptedException {
+        locker.globalLock();
+        locker.globalUnlock();
+    }
+
+    @Test(expected = IllegalMonitorStateException.class)
+    public void lockerShouldThrowIllegalMonitorExceptionsOnGlobalUnlockWithoutGlobalLock() {
+        locker.globalUnlock();
+    }
+
+    @Test
+    public void lockerShouldNotThrowExceptionsOnGlobalTwoThreads() throws ExecutionException, InterruptedException {
+        Future<?> future1 = executorService.submit(createRunnableWithGlobalLock());
+        Future<?> future2 = executorService.submit(createRunnableWithGlobalLock());
+        future1.get();
+        future2.get();
+    }
+
+    @Test(expected = IllegalMonitorStateException.class)
+    public void lockerShouldThrowIllegalMonitorExceptionsOnGlobalUnlockFromOtherThread() throws ExecutionException, InterruptedException {
+        CountDownLatch endLatch = new CountDownLatch(THREADS_COUNT);
+
+        Future<?> future = executorService.submit(createRunnableWithGlobalLockAndEndLatch(endLatch));
+        try {
+            latch.countDown();
+            latch.await();
+            locker.globalUnlock();
+        } finally {
+            endLatch.countDown();
+            future.get();
+        }
+    }
+
+    @Test
+    public void lockerShouldNotThrowExceptionsOnGlobalReentrantLock() throws InterruptedException {
+        locker.globalLock();
+        locker.globalLock();
+        locker.globalUnlock();
+        locker.globalUnlock();
+    }
+
+    @Test
+    public void lockerShouldNotThrowExceptionsOnLockAndGlobalLockFromDifferentThreads() throws InterruptedException, ExecutionException {
+        Integer entityId = 129;
+
+        Future<?> future = executorService.submit(createRunnable(entityId));
+
+        latch.countDown();
+        latch.await();
+        locker.globalLock();
+        locker.globalUnlock();
+
+        future.get();
+    }
+
+    @Test
+    public void lockerShouldNotThrowExceptionsOnLockAndThenGlobalLockFromDifferentThreads() throws InterruptedException, ExecutionException {
+        Integer entityId = 129;
+
+        Future<?> future = executorService.submit(createRunnableWithLockAndLatch(entityId));
+
+        latch.countDown();
+        latch.await();
+        locker.globalLock();
+        locker.globalUnlock();
+
+        future.get();
+    }
+
+    @Test
+    public void lockerShouldNotThrowExceptionsOnGlobalLockAndThenLockFromDifferentThreads() throws InterruptedException, ExecutionException {
+        Integer entityId = 129;
+
+        Future<?> future = executorService.submit(createRunnable(entityId));
+
+        locker.globalLock();
+        latch.countDown();
+        latch.await();
+        locker.globalUnlock();
+
+        future.get();
+    }
+
+    @Test
+    public void lockerShouldReturnFalseOnGlobalLockAndThenTryLockFromDifferentThreads() throws InterruptedException, ExecutionException {
+        Integer entityId = 129;
+
+        Future<Boolean> future = executorService.submit(createCallable(entityId));
+
+        locker.globalLock();
+        latch.countDown();
+        latch.await();
+
+        assertFalse(future.get());
+
+        locker.globalUnlock();
     }
 
 
@@ -185,7 +269,21 @@ public class ConcurrentMapEntityLockerTest {
         };
     }
 
-    private Runnable createRunnableWithEndLatch(Integer entityId, CountDownLatch endLatch) {
+    private Runnable createRunnableWithLockAndLatch(Integer entityId) {
+        return () -> {
+            try {
+                locker.lock(entityId);
+                latch.countDown();
+                latch.await();
+            } catch (InterruptedException e) {
+                log.error("Will never happen probably");
+            } finally {
+                locker.unlock(entityId);
+            }
+        };
+    }
+
+    private Runnable createRunnableWithLockAndEndLatch(Integer entityId, CountDownLatch endLatch) {
         return () -> {
             try {
                 locker.lock(entityId);
@@ -203,15 +301,47 @@ public class ConcurrentMapEntityLockerTest {
 
     private Callable<Boolean> createCallable(Integer entityId) {
         return () -> {
+            boolean result = false;
             try {
                 latch.countDown();
                 latch.await();
-                return locker.tryLock(entityId, 1, TimeUnit.SECONDS);
+                result = locker.tryLock(entityId, 1, TimeUnit.SECONDS);
+                return result;
             } catch (InterruptedException e) {
                 log.error("Will never happen probably");
                 return false;
             } finally {
-                locker.unlock(entityId);
+                if (result) {
+                    locker.unlock(entityId);
+                }
+            }
+        };
+    }
+
+    private Runnable createRunnableWithGlobalLock() {
+        return () -> {
+            try {
+                locker.globalLock();
+            } catch (InterruptedException e) {
+                log.error("Will never happen probably");
+            } finally {
+                locker.globalUnlock();
+            }
+        };
+    }
+
+    private Runnable createRunnableWithGlobalLockAndEndLatch(CountDownLatch endLatch) {
+        return () -> {
+            try {
+                locker.globalLock();
+                latch.countDown();
+                latch.await();
+                endLatch.countDown();
+                endLatch.await();
+            } catch (InterruptedException e) {
+                log.error("Will never happen probably");
+            } finally {
+                locker.globalUnlock();
             }
         };
     }

@@ -47,4 +47,18 @@ public interface EntityLocker<ID> {
      * @param entityId id of the entity that is needed to be released
      */
     void unlock(ID entityId);
+
+    /**
+     * Acquire global lock to have exclusive access to all entities.
+     *
+     * @throws InterruptedException if the current thread is interrupted while acquiring the lock
+     */
+    void globalLock() throws InterruptedException;
+
+    /**
+     * Release global lock.
+     *
+     * @throws IllegalMonitorStateException if the current thread is not holding the lock
+     */
+    void globalUnlock();
 }

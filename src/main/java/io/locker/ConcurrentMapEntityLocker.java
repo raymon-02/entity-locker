@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -22,6 +23,9 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
     private final ConcurrentHashMap<ID, ReentrantLock> lockerMap;
     private final ConcurrentHashMap<ID, Integer> lockerCountMap;
 
+    private final ReentrantLock globalLock = new ReentrantLock();
+    private final Condition onlyGlobalLock = globalLock.newCondition();
+
     public ConcurrentMapEntityLocker() {
         this.lockerMap = new ConcurrentHashMap<>();
         this.lockerCountMap = new ConcurrentHashMap<>();
@@ -37,10 +41,12 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
      * @throws InterruptedException if the current thread is interrupted while acquiring the lock
      */
     public void lock(@NonNull ID entityId) throws InterruptedException {
+        globalLock.lockInterruptibly();
         for (; ; ) {
             ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
             lock.lockInterruptibly();
             if (lock == lockerMap.get(entityId)) {
+                globalLock.unlock();
                 incrementEntityLockCount(entityId);
                 log.info("Lock for entity with id={} is acquired", entityId);
                 return;
@@ -48,6 +54,7 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
             lock.unlock();
         }
     }
+
 
     /**
      * Try to acquire the lock on specified entity id within the specified waiting timeout.
@@ -64,12 +71,17 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
     @Override
     public boolean tryLock(@NonNull ID entityId, long time, @NonNull TimeUnit unit) throws InterruptedException {
         long timeout = System.nanoTime() + unit.toNanos(time);
+        if (!globalLock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+            return false;
+        }
         for (; ; ) {
             ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
             if (!lock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+                globalLock.unlock();
                 return false;
             }
             if (lock == lockerMap.get(entityId)) {
+                globalLock.unlock();
                 incrementEntityLockCount(entityId);
                 log.info("Lock for entity with id={} is acquired", entityId);
                 return true;
@@ -93,11 +105,41 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
         }
 
         if (decrementEntityLockCount(entityId) == 0 && !lock.hasQueuedThreads()) {
+            lockerCountMap.remove(entityId);
             lockerMap.remove(entityId);
+            signalRemoveFromLockerMap();
         }
 
         lock.unlock();
         log.info("Lock for entity with id={} is released", entityId);
+    }
+
+    /**
+     * Acquire global lock to have exclusive access to all entities.
+     *
+     * @throws InterruptedException if the current thread is interrupted while acquiring the lock
+     */
+    @Override
+    public void globalLock() throws InterruptedException {
+        globalLock.lockInterruptibly();
+        while (!lockerCountMap.isEmpty()) {
+            onlyGlobalLock.await(1000, TimeUnit.MILLISECONDS);
+        }
+        log.info("Global Lock is acquired");
+    }
+
+    /**
+     * Release global lock.
+     *
+     * @throws IllegalMonitorStateException if the current thread is not holding the lock
+     */
+    @Override
+    public void globalUnlock() {
+        if (!globalLock.isHeldByCurrentThread()) {
+            throw new IllegalMonitorStateException();
+        }
+        globalLock.unlock();
+        log.info("Global Lock is released");
     }
 
     private void incrementEntityLockCount(ID entityId) {
@@ -107,5 +149,11 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
 
     private int decrementEntityLockCount(ID entityId) {
         return lockerCountMap.compute(entityId, (id, currentCount) -> currentCount - 1);
+    }
+
+    private void signalRemoveFromLockerMap() {
+        globalLock.lock();
+        onlyGlobalLock.signal();
+        globalLock.unlock();
     }
 }
