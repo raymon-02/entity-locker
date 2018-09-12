@@ -43,16 +43,20 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
     public void lock(@NonNull ID entityId) throws InterruptedException {
         for (; ; ) {
             globalLock.lockInterruptibly();
+            log.info("Global Lock is temporary acquired for entity with id={}", entityId);
             ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
-            lock.lockInterruptibly();
-            if (lock == lockerMap.get(entityId)) {
+            try {
+                lock.lockInterruptibly();
+                if (lock == lockerMap.get(entityId)) {
+                    incrementEntityLockCount(entityId);
+                    log.info("Lock for entity with id={} is acquired", entityId);
+                    return;
+                }
+                lock.unlock();
+            } finally {
                 globalLock.unlock();
-                incrementEntityLockCount(entityId);
-                log.info("Lock for entity with id={} is acquired", entityId);
-                return;
+                log.info("Global Lock is released for entity with id={}", entityId);
             }
-            globalLock.unlock();
-            lock.unlock();
         }
     }
 
@@ -76,19 +80,22 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
             if (!globalLock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
                 return false;
             }
+            log.info("Global Lock is temporary acquired for entity with id={}", entityId);
             ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
-            if (!lock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+            try {
+                if (!lock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+                    return false;
+                }
+                if (lock == lockerMap.get(entityId)) {
+                    incrementEntityLockCount(entityId);
+                    log.info("Lock for entity with id={} is acquired", entityId);
+                    return true;
+                }
+                lock.unlock();
+            } finally {
                 globalLock.unlock();
-                return false;
+                log.info("Global Lock is released for entity with id={}", entityId);
             }
-            if (lock == lockerMap.get(entityId)) {
-                globalLock.unlock();
-                incrementEntityLockCount(entityId);
-                log.info("Lock for entity with id={} is acquired", entityId);
-                return true;
-            }
-            globalLock.unlock();
-            lock.unlock();
         }
     }
 
