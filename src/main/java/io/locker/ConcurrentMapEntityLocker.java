@@ -6,8 +6,11 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.locks.Condition;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReadWriteLock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * A reentrant implementation of {@link EntityLocker}.
@@ -23,8 +26,11 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
     private final ConcurrentHashMap<ID, ReentrantLock> lockerMap;
     private final ConcurrentHashMap<ID, Integer> lockerCountMap;
 
-    private final ReentrantLock globalLock = new ReentrantLock();
-    private final Condition onlyGlobalLock = globalLock.newCondition();
+    private final ReadWriteLock readWriteLock = new ReentrantReadWriteLock();
+    private final Lock readGlobalLock = readWriteLock.readLock();
+    private final Lock writeGlobalLock = readWriteLock.writeLock();
+    private final AtomicLong globalLockThreadId = new AtomicLong(-1);
+
 
     public ConcurrentMapEntityLocker() {
         this.lockerMap = new ConcurrentHashMap<>();
@@ -41,9 +47,9 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
      * @throws InterruptedException if the current thread is interrupted while acquiring the lock
      */
     public void lock(@NonNull ID entityId) throws InterruptedException {
+        readGlobalLock.lockInterruptibly();
+        log.info("Global READ Lock is acquired for entity with id={}", entityId);
         for (; ; ) {
-            globalLock.lockInterruptibly();
-            log.info("Global Lock is temporary acquired for entity with id={}", entityId);
             ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
             try {
                 lock.lockInterruptibly();
@@ -53,9 +59,8 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
                     return;
                 }
                 lock.unlock();
-            } finally {
-                globalLock.unlock();
-                log.info("Global Lock is released for entity with id={}", entityId);
+            } catch (InterruptedException e) {
+                readGlobalLock.unlock();
             }
         }
     }
@@ -76,26 +81,25 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
     @Override
     public boolean tryLock(@NonNull ID entityId, long time, @NonNull TimeUnit unit) throws InterruptedException {
         long timeout = System.nanoTime() + unit.toNanos(time);
+
+        if (!readGlobalLock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+            return false;
+        }
+        log.info("Global READ Lock is acquired for entity with id={}", entityId);
+
         for (; ; ) {
-            if (!globalLock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+            ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
+            if (!lock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
+                readGlobalLock.unlock();
+                log.info("Global READ Lock is released for entity with id={}", entityId);
                 return false;
             }
-            log.info("Global Lock is temporary acquired for entity with id={}", entityId);
-            ReentrantLock lock = lockerMap.computeIfAbsent(entityId, id -> new ReentrantLock());
-            try {
-                if (!lock.tryLock(timeout - System.nanoTime(), TimeUnit.NANOSECONDS)) {
-                    return false;
-                }
-                if (lock == lockerMap.get(entityId)) {
-                    incrementEntityLockCount(entityId);
-                    log.info("Lock for entity with id={} is acquired", entityId);
-                    return true;
-                }
-                lock.unlock();
-            } finally {
-                globalLock.unlock();
-                log.info("Global Lock is released for entity with id={}", entityId);
+            if (lock == lockerMap.get(entityId)) {
+                incrementEntityLockCount(entityId);
+                log.info("Lock for entity with id={} is acquired", entityId);
+                return true;
             }
+            lock.unlock();
         }
     }
 
@@ -116,11 +120,13 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
         if (decrementEntityLockCount(entityId) == 0 && !lock.hasQueuedThreads()) {
             lockerCountMap.remove(entityId);
             lockerMap.remove(entityId);
-            signalRemoveFromLockerMap();
         }
 
         lock.unlock();
         log.info("Lock for entity with id={} is released", entityId);
+
+        readGlobalLock.unlock();
+        log.info("Global READ Lock is released for entity with id={}", entityId);
     }
 
     /**
@@ -130,10 +136,8 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
      */
     @Override
     public void globalLock() throws InterruptedException {
-        globalLock.lockInterruptibly();
-        while (!lockerCountMap.isEmpty()) {
-            onlyGlobalLock.await(1000, TimeUnit.MILLISECONDS);
-        }
+        writeGlobalLock.lockInterruptibly();
+        globalLockThreadId.set(Thread.currentThread().getId());
         log.info("Global Lock is acquired");
     }
 
@@ -144,10 +148,10 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
      */
     @Override
     public void globalUnlock() {
-        if (!globalLock.isHeldByCurrentThread()) {
+        if (globalLockThreadId.get() != Thread.currentThread().getId()) {
             throw new IllegalMonitorStateException();
         }
-        globalLock.unlock();
+        writeGlobalLock.unlock();
         log.info("Global Lock is released");
     }
 
@@ -158,11 +162,5 @@ public class ConcurrentMapEntityLocker<ID> implements EntityLocker<ID> {
 
     private int decrementEntityLockCount(ID entityId) {
         return lockerCountMap.compute(entityId, (id, currentCount) -> currentCount - 1);
-    }
-
-    private void signalRemoveFromLockerMap() {
-        globalLock.lock();
-        onlyGlobalLock.signal();
-        globalLock.unlock();
     }
 }
